@@ -137,6 +137,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             (false, false) => ("○ LED off", Style::default().fg(Color::DarkGray)),
         };
 
+        let (net_text, net_style) = if app.net_enabled {
+            ("● WiFi on", Style::default().fg(Color::Green))
+        } else {
+            ("○ WiFi off", Style::default().fg(Color::DarkGray))
+        };
+
         Line::from(vec![
             Span::styled(" q", Style::default().fg(Color::Yellow)),
             Span::raw(":quit  "),
@@ -148,6 +154,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Span::raw(":clear  "),
             Span::styled("l", Style::default().fg(Color::Yellow)),
             Span::raw(":led  "),
+            Span::styled("w", Style::default().fg(Color::Yellow)),
+            Span::raw(":wifi  "),
             Span::raw("| "),
             Span::styled(
                 format!("{} active", active_count),
@@ -169,6 +177,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             },
             Span::raw("  "),
             Span::styled(led_text, led_style),
+            Span::raw("  "),
+            Span::styled(net_text, net_style),
         ])
     };
 

@@ -18,6 +18,12 @@ pub struct Config {
     /// auto-detects a known ESP32 board by USB vendor ID on each scan, which
     /// survives the board being unplugged and replugged at a different path.
     pub led_port: Option<String>,
+    /// Whether the menu bar daemon should broadcast session state over UDP on
+    /// the local network for a wireless ESP32 totem. Off by default — the
+    /// daemon sends nothing until a user explicitly enables it (TUI: press `w`).
+    pub net_enabled: bool,
+    /// UDP port for the state broadcast. `None` uses [`crate::net::DEFAULT_PORT`].
+    pub net_port: Option<u16>,
 }
 
 pub fn config_file_path() -> PathBuf {
@@ -62,6 +68,8 @@ mod tests {
         let cfg = Config {
             led_enabled: true,
             led_port: Some("/dev/cu.usbmodem101".to_string()),
+            net_enabled: true,
+            net_port: Some(38737),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();

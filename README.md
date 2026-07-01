@@ -159,6 +159,24 @@ connects through a CH340/CP210x UART bridge and you have other serial
 devices attached (e.g. an Arduino), pin it explicitly via `led_port` in
 the config (e.g. `COM5` or `/dev/cu.usbserial-XXXX`).
 
+## Wireless broadcast (optional)
+
+For a wireless ESP32 totem — no USB cable — clawlight can broadcast the
+aggregate session state as a small JSON datagram over UDP on your local
+network (port 38737 by default). The payload carries the aggregate color,
+per-status counts, and the name/project/permission-prompt text of the
+highest-priority session, so a display can show *why* the light is red.
+
+**Setup:** open `clawlight` and press **`w`**. The tray daemon broadcasts
+from then on; press `w` again to turn it off. Broadcasting is **off by
+default** — nothing is sent until you enable it. The port can be changed
+via `net_port` in `~/.claude/clawlight/config.json`.
+
+For debugging, run the broadcaster in the foreground with `clawlight net`
+(use `--port` to override) and watch the datagrams with any UDP listener.
+Receivers should treat ~10s of silence as "PC offline" rather than holding
+the last state.
+
 ## Uninstall
 
 ```bash

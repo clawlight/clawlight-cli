@@ -25,6 +25,8 @@ pub struct App {
     pub led_enabled: bool,
     /// Whether a known ESP32 board is currently attached (refreshed on a timer).
     pub led_detected: bool,
+    /// Whether the wireless UDP state broadcast is enabled (mirrors `config.json`).
+    pub net_enabled: bool,
     /// Transient one-line feedback shown in the status bar (message + when set).
     pub status_message: Option<(String, Instant)>,
     previous_statuses: HashMap<String, Status>,
@@ -50,6 +52,7 @@ impl App {
             should_quit: false,
             led_enabled: config::read_config().led_enabled,
             led_detected: led::detect_board().is_some(),
+            net_enabled: config::read_config().net_enabled,
             status_message: None,
             previous_statuses,
         }
@@ -82,6 +85,22 @@ impl App {
                     "No ESP32 detected — plug in the board and press l.".to_string(),
                 );
             }
+        }
+    }
+
+    /// Toggle the wireless UDP state broadcast. Unlike the serial LEDs there's
+    /// nothing to detect up front — the receiving board is elsewhere on the
+    /// network — so this is a plain on/off switch.
+    fn toggle_net(&mut self) {
+        let mut cfg = config::read_config();
+        cfg.net_enabled = !cfg.net_enabled;
+        self.net_enabled = cfg.net_enabled;
+        let _ = config::write_config(&cfg);
+        if cfg.net_enabled {
+            let port = cfg.net_port.unwrap_or(crate::net::DEFAULT_PORT);
+            self.set_status(format!("Wireless broadcast enabled on UDP port {port}."));
+        } else {
+            self.set_status("Wireless broadcast disabled.".to_string());
         }
     }
 
@@ -233,6 +252,7 @@ impl App {
                             KeyCode::Char('r') => self.reload_data(),
                             KeyCode::Char('x') => self.clear_selected(),
                             KeyCode::Char('l') => self.toggle_led(),
+                            KeyCode::Char('w') => self.toggle_net(),
                             _ => {}
                         }
                     }

@@ -167,6 +167,10 @@ pub fn run() -> anyhow::Result<()> {
     // TUI, so it's safe to always spawn.
     thread::spawn(|| crate::led::run_daemon());
 
+    // Likewise for the wireless UDP broadcast — inert (sends nothing) unless
+    // enabled via `w` in the TUI.
+    thread::spawn(|| crate::net::run_daemon());
+
     let initial_state = read_hook_state();
     let (menu, mut ids) = build_menu(&initial_state)?;
     let tray = TrayIconBuilder::new()

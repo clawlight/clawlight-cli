@@ -3,6 +3,7 @@ mod config;
 mod hook;
 mod led;
 mod menubar;
+mod net;
 mod notification;
 mod session;
 mod spawn;
@@ -44,6 +45,12 @@ enum Commands {
         #[arg(long)]
         port: Option<String>,
     },
+    /// Broadcast session state over UDP for a wireless ESP32 (foreground)
+    Net {
+        /// UDP port to broadcast on (default: 38737, or `net_port` from config)
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// (internal) Hook backend invoked by Claude Code over stdin
     #[command(hide = true)]
     Hook,
@@ -63,6 +70,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Uninstall) => uninstall_hooks(),
         Some(Commands::Menubar) => menubar::run(),
         Some(Commands::Led { port }) => led::run(port),
+        Some(Commands::Net { port }) => net::run(port),
         Some(Commands::Hook) => hook::run(),
         Some(Commands::Name {
             session_id,

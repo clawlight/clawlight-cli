@@ -33,6 +33,12 @@ pub struct SessionStatus {
     pub project_path: Option<String>,
     pub notification_type: Option<String>,
     pub name: Option<String>,
+    /// Human-readable text of the last Notification event (e.g. "Claude needs
+    /// your permission to use Bash"). Cleared on any other status transition,
+    /// so it's only present while the session actually needs help. Optional
+    /// with a default so state files written before this field deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

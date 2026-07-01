@@ -50,6 +50,7 @@ pub fn run() -> anyhow::Result<()> {
     let session_id = field("session_id");
     let cwd = field("cwd");
     let notification_type = field("notification_type");
+    let message = field("message");
     let transcript_path = field("transcript_path").unwrap_or_default();
 
     let session_id = match session_id {
@@ -105,6 +106,14 @@ pub fn run() -> anyhow::Result<()> {
             project_path: cwd,
             notification_type,
             name: existing_name.clone(),
+            // The notification text ("Claude needs your permission to use
+            // Bash") is only meaningful while the session needs help; any
+            // other event means it was answered or superseded.
+            message: if hook_event == "Notification" {
+                message
+            } else {
+                None
+            },
         },
     );
 
