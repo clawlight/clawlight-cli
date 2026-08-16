@@ -186,6 +186,42 @@ popover's Settings view.
 
 A ready-made desk light is at [clawlight.dev](https://clawlight.dev).
 
+## Privacy
+
+clawlight runs on your machine. Session names, prompts, transcripts, file
+paths, and project names never leave it. Status lives in a local file and
+goes out over a USB cable to the lamp, and nowhere else. Usage/spend tracking
+is off unless you turn it on, and while it's off nothing reads your Claude
+Code transcripts or credentials.
+
+The one exception is a **single anonymous message, sent once per machine**, the
+first time you install. It's printed to your terminal before it's sent:
+
+```json
+{"event":"install","version":"0.13.0","os":"macos","arch":"arm64",
+ "harnesses":["claude","codex"],"lamp":true,"source":"brew"}
+```
+
+That's all of it: which coding agents were detected, the platform, the CLI
+version, and whether a lamp was plugged in. It tells the project which agents
+are worth supporting. It contains **no identifier of any kind**: no install ID,
+no machine ID, no hostname, no username, no IP, no paths, no session data.
+Nothing links one ping to another. Reinstalls and upgrades send nothing.
+
+Opt out with any of:
+
+```bash
+CLAWLIGHT_NO_TELEMETRY=1 clawlight install
+clawlight install --no-telemetry
+DO_NOT_TRACK=1 clawlight install        # the cross-tool convention
+```
+
+CI is excluded automatically, and the tray daemon never sends anything. The
+ping only comes from an install you ran yourself. The code is
+[`src/telemetry.rs`](src/telemetry.rs); the receiving end stores no IP, no user
+agent, and no time more precise than the date, and expires rows after ~400
+days. Full details: [clawlight.dev/privacy](https://clawlight.dev/privacy).
+
 ## Uninstall
 
 ```bash

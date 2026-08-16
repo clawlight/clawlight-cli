@@ -25,6 +25,10 @@ fn run(home: &TempDir, subcommand: &str) {
         .expect("binary built")
         .arg(subcommand)
         .env("HOME", home.path())
+        // `install` would otherwise send its one-time install ping to the real
+        // endpoint from every developer's `cargo test` (CI is covered by the
+        // CI-env opt-out, a local run is not). See telemetry.rs.
+        .env("CLAWLIGHT_NO_TELEMETRY", "1")
         .assert()
         .success();
 }
@@ -333,4 +337,148 @@ fn copilot_hook_files_that_are_not_ours_are_left_alone() {
         "a file that isn't ours is never deleted"
     );
     assert!(sibling.exists(), "sibling hook files are untouched");
+}
+
+// ---------------------------------------------------------------------------
+// The one-time install ping (telemetry.rs)
+// ---------------------------------------------------------------------------
+
+/// Run `install` with telemetry *enabled* but aimed at a dead local port, so the
+/// whole path (notice, marker, spawn) runs for real without a packet reaching
+/// the internet. `curl` fails instantly against a closed port and the CLI
+/// ignores the failure by design.
+fn run_install_with_ping(home: &TempDir) -> String {
+    let out = Command::cargo_bin("clawlight")
+        .expect("binary built")
+        .arg("install")
+        .env("HOME", home.path())
+        .env("CLAWLIGHT_TELEMETRY_URL", "http://127.0.0.1:1/api/install")
+        .env_remove("CLAWLIGHT_NO_TELEMETRY")
+        .env_remove("DO_NOT_TRACK")
+        .env_remove("CI")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn the_install_ping_is_announced_once_and_never_repeats() {
+    let home = TempDir::new().unwrap();
+    let marker = home.path().join(".claude/clawlight/.install-reported");
+
+    let first = run_install_with_ping(&home);
+    assert!(
+        first.contains(r#""event":"install""#),
+        "the exact payload is printed before it is sent:\n{first}"
+    );
+    assert!(
+        first.contains("CLAWLIGHT_NO_TELEMETRY=1"),
+        "the opt-out is printed with it:\n{first}"
+    );
+    assert!(marker.exists(), "the once-per-machine marker is written");
+
+    // Re-running install is routine (every upgrade does it). It must be silent.
+    let second = run_install_with_ping(&home);
+    assert!(
+        !second.contains(r#""event":"install""#),
+        "a reinstall must not ping again:\n{second}"
+    );
+}
+
+#[test]
+fn the_install_ping_payload_carries_no_identifying_data() {
+    let home = TempDir::new().unwrap();
+    // Make a harness detectable so the interesting field isn't empty.
+    std::fs::create_dir_all(home.path().join(".config/opencode")).unwrap();
+
+    let printed = run_install_with_ping(&home);
+    let line = printed
+        .lines()
+        .find(|l| l.contains(r#""event":"install""#))
+        .expect("payload line printed")
+        .trim();
+    let payload: Value = serde_json::from_str(line).expect("printed payload is valid JSON");
+
+    let mut keys: Vec<&str> = payload
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "arch",
+            "event",
+            "harnesses",
+            "lamp",
+            "os",
+            "source",
+            "version"
+        ],
+        "the wire payload is exactly the declared fields, nothing more"
+    );
+    assert!(
+        payload["harnesses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h == "opencode"),
+        "the detected harness is what gets reported: {payload}"
+    );
+    assert!(
+        !line.contains(home.path().to_str().unwrap()),
+        "no path from this machine appears in the payload: {line}"
+    );
+}
+
+#[test]
+fn opting_out_sends_nothing_and_leaves_no_marker() {
+    let home = TempDir::new().unwrap();
+
+    // The env opt-out.
+    let quiet = Command::cargo_bin("clawlight")
+        .expect("binary built")
+        .arg("install")
+        .env("HOME", home.path())
+        .env("CLAWLIGHT_NO_TELEMETRY", "1")
+        .env("CLAWLIGHT_TELEMETRY_URL", "http://127.0.0.1:1/api/install")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        !String::from_utf8(quiet).unwrap().contains(r#""event""#),
+        "CLAWLIGHT_NO_TELEMETRY must suppress the ping entirely"
+    );
+
+    // The flag, on a machine that has never pinged.
+    let flagged = Command::cargo_bin("clawlight")
+        .expect("binary built")
+        .args(["install", "--no-telemetry"])
+        .env("HOME", home.path())
+        .env_remove("CLAWLIGHT_NO_TELEMETRY")
+        .env("CLAWLIGHT_TELEMETRY_URL", "http://127.0.0.1:1/api/install")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        !String::from_utf8(flagged).unwrap().contains(r#""event""#),
+        "--no-telemetry must suppress the ping entirely"
+    );
+
+    assert!(
+        !home
+            .path()
+            .join(".claude/clawlight/.install-reported")
+            .exists(),
+        "an opt-out must not consume the machine's one-time ping"
+    );
 }
