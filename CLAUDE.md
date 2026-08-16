@@ -241,6 +241,21 @@ thin:
   usage section stay empty regardless of any cached snapshot. Enabling it is what
   authorizes that work. The foreground `clawlight usage` subcommand is the exception:
   running it is itself the opt-in for that one invocation, like `clawlight led`.
+- **The install ping is one-time, unidentified, and foreground-only** (`telemetry.rs`).
+  `maybe_report_install` is called from `install_hooks` and *only* there. The tray
+  daemon's `first_run_setup_daemon` calls `register_hooks` directly and must never
+  reach it, because a background process phoning home with no terminal to print the
+  notice in is the whole thing users object to. Three invariants: the payload is a
+  handful of fixed-vocabulary enums (`harness::detected_harnesses`, os, arch,
+  version, lamp bool, install source) and **never** an identifier, path, or count,
+  and a test pins the exact key set; the once-per-machine marker is its own file
+  (`~/.claude/clawlight/.install-reported`), *not* a `config.json` field, because
+  `maybe_autoenable_led` reads "no config.json yet" as the clean-first-install
+  signal and would stop auto-enabling lamps; and Claude's own detection uses
+  `~/.claude/projects` (written by Claude Code), never `~/.claude` or
+  `settings.json`, both of which our own installer creates moments earlier. Any
+  test that runs `install` must set `CLAWLIGHT_NO_TELEMETRY=1`. CI is covered by
+  the `CI` env opt-out, a developer's local `cargo test` is not.
 - **Escape before shelling out.** The macOS notification path builds an AppleScript
   string — escape `\` before `"`.
 - Platform-specific code is `#[cfg(...)]`-gated in place (autostart in main.rs, console

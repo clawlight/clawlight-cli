@@ -56,6 +56,38 @@ pub fn uninstall_all() {
     }
 }
 
+/// Which coding agents look installed on this machine, sorted — Claude Code
+/// plus every detected [`ADAPTERS`] entry.
+///
+/// Used by the one-time install ping (`telemetry.rs`) to answer the only
+/// question the project can't answer from the code: which harnesses users
+/// actually run. Lives here so a new [`Adapter`] entry is still the only edit
+/// needed to support an agent.
+pub fn detected_harnesses() -> Vec<&'static str> {
+    let mut found: Vec<&'static str> = ADAPTERS
+        .iter()
+        .filter(|a| (a.detected)())
+        .map(|a| a.name)
+        .collect();
+    if claude_detected() {
+        found.push("claude");
+    }
+    found.sort_unstable();
+    found
+}
+
+/// Whether Claude Code itself is present. Claude has no [`Adapter`] (it's the
+/// built-in default), so its detection lives here alongside the rest.
+///
+/// Deliberately does **not** test for `~/.claude` or `~/.claude/settings.json`:
+/// clawlight's own installer creates both, and this runs *after* that, so
+/// either would report Claude on every machine. `~/.claude/projects` is written
+/// by Claude Code when it runs a session and never by us.
+fn claude_detected() -> bool {
+    dirs::home_dir().is_some_and(|h| h.join(".claude").join("projects").exists())
+        || is_on_path("claude")
+}
+
 /// The UI badge for a harness name: the adapter's explicit tag, or a two-char
 /// fallback for an unknown/future harness so a session never renders blank.
 /// Registered harnesses should always have an explicit, unique `badge`.

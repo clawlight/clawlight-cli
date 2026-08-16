@@ -13,6 +13,7 @@ mod popover;
 mod session;
 mod spawn;
 mod state;
+mod telemetry;
 mod terminal;
 mod ui;
 mod usage;
@@ -44,7 +45,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Install hooks into ~/.claude/settings.json and start the tray daemon
-    Install,
+    Install {
+        /// Skip the one-time anonymous ping about which coding agents are
+        /// installed (same as setting CLAWLIGHT_NO_TELEMETRY=1)
+        #[arg(long)]
+        no_telemetry: bool,
+    },
     /// Uninstall hooks and clean up
     Uninstall,
     /// Run the menu bar / system tray daemon (foreground)
@@ -94,7 +100,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Install) => install_hooks(),
+        Some(Commands::Install { no_telemetry }) => install_hooks(no_telemetry),
         Some(Commands::Uninstall) => uninstall_hooks(),
         Some(Commands::Menubar) => menubar::run(),
         Some(Commands::Led { port }) => led::run(port),
@@ -232,7 +238,7 @@ fn register_hooks() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn install_hooks() -> anyhow::Result<()> {
+fn install_hooks(no_telemetry: bool) -> anyhow::Result<()> {
     // 1./2. Register the hook backend in settings.json.
     register_hooks()?;
 
@@ -250,6 +256,14 @@ fn install_hooks() -> anyhow::Result<()> {
     if !lamp_enabled {
         println!("Optional: plug in a Seeed XIAO ESP32-C6 status board and press `l` in the dashboard to enable status LEDs.");
     }
+
+    // 5. On a machine's first install only, report which coding agents were
+    //    found, printed in full first, and skippable. Called from here rather
+    //    than `register_hooks` on purpose: this is the foreground path, so the
+    //    notice lands in a terminal someone is looking at. The tray daemon's
+    //    first-run bootstrap calls `register_hooks` directly and must never
+    //    reach this. See telemetry.rs.
+    telemetry::maybe_report_install(no_telemetry);
     Ok(())
 }
 
@@ -336,7 +350,10 @@ fn first_run_setup_tui() {
     println!(
         "First run: registering hooks for Claude Code and every detected coding agent (opencode, Codex, Copilot), then starting the menu bar daemon…\n"
     );
-    if let Err(e) = install_hooks() {
+    // `false`: the TUI has no --no-telemetry flag of its own, and this path is
+    // still a foreground terminal, so the ping's notice is visible in scrollback
+    // once the dashboard is closed. The env opt-outs apply here as everywhere.
+    if let Err(e) = install_hooks(false) {
         eprintln!(
             "clawlight: first-run setup failed: {e:#}\nRun `clawlight install` to finish setup."
         );
