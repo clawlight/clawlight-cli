@@ -511,6 +511,64 @@ fn copilot_event_verb(event_name: &str) -> Option<&'static str> {
     }
 }
 
+/// Cursor's native dialect carries the stable `conversation_id` on all hooks.
+/// `session_id` aliases it on lifecycle events; `generation_id` changes every
+/// turn and must never be used as the session key. See cursor.rs for wiring.
+pub fn run_cursor_hook() -> anyhow::Result<()> {
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    let v: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
+    let field = |key: &str| {
+        v.get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+    };
+    let event_name = field("hook_event_name").unwrap_or_default();
+    let event = match event_name {
+        "sessionStart" | "preToolUse" => "working",
+        "beforeSubmitPrompt" | "postToolUse" => "resumed",
+        "stop" => "idle",
+        "sessionEnd" => "ended",
+        // No documented approval-wait event. Tool hooks are not evidence of
+        // a permission prompt; subagent stops must not idle the parent either.
+        _ => return Ok(()),
+    };
+    let Some(session_id) = field("conversation_id").or_else(|| field("session_id")) else {
+        return Ok(());
+    };
+    // Prefer the workspace root over a tool's cwd (which may be a subfolder).
+    // Never use our process cwd: user hooks execute inside ~/.cursor/.
+    let directory = v
+        .get("workspace_roots")
+        .and_then(Value::as_array)
+        .and_then(|roots| {
+            roots
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|s| !s.trim().is_empty())
+        })
+        .or_else(|| field("cwd"));
+    ingest_event(&serde_json::json!({
+        "harness": "cursor",
+        "event": event,
+        "session_id": session_id,
+        "directory": directory,
+    }))?;
+    if event_name == "beforeSubmitPrompt" {
+        if let Some(prompt) = field("prompt") {
+            let name = crate::session::truncate(prompt.trim().lines().next().unwrap_or(""), 50);
+            update_state(|state| match state.sessions.get_mut(session_id) {
+                Some(s) if s.name.is_none() => {
+                    s.name = Some(name.clone());
+                    true
+                }
+                _ => false,
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// Sweep one harness's still-live sessions to `Done` on a harness restart.
 ///
 /// opencode fires no per-session shutdown event when its process just exits, so

@@ -2,6 +2,7 @@ mod app;
 mod codex;
 mod config;
 mod copilot;
+mod cursor;
 mod harness;
 mod hook;
 mod led;
@@ -34,7 +35,7 @@ use crate::app::App;
 #[derive(Parser)]
 #[command(
     name = "clawlight",
-    about = "TUI dashboard for Claude Code, opencode, Codex CLI, and GitHub Copilot CLI sessions"
+    about = "TUI dashboard for Claude Code, opencode, Codex CLI, GitHub Copilot CLI, and Cursor sessions"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -75,6 +76,9 @@ enum Commands {
     /// (internal) Codex hook shim: Claude-dialect payload → normalized event
     #[command(hide = true)]
     CodexHook,
+    /// (internal) Cursor native hook payload → normalized event
+    #[command(hide = true)]
+    CursorHook,
     /// (internal) Copilot hook shim: per-event payload → normalized event
     #[command(hide = true)]
     CopilotHook {
@@ -103,6 +107,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Hook) => hook::run(),
         Some(Commands::Event) => hook::run_event(),
         Some(Commands::CodexHook) => hook::run_codex_hook(),
+        Some(Commands::CursorHook) => hook::run_cursor_hook(),
         Some(Commands::CopilotHook { event }) => hook::run_copilot_hook(&event),
         Some(Commands::Name {
             session_id,
@@ -244,7 +249,7 @@ fn install_hooks() -> anyhow::Result<()> {
     install_autostart()?;
 
     println!(
-        "\nInstallation complete! Hooks are now active for Claude Code and every detected coding agent (opencode, Codex, Copilot)."
+        "\nInstallation complete! Hooks are now active for Claude Code and every detected coding agent (opencode, Codex, Copilot, Cursor)."
     );
     println!("Run `clawlight` to launch the TUI dashboard.");
     if !lamp_enabled {
@@ -334,7 +339,7 @@ fn first_run_setup_tui() {
         return;
     }
     println!(
-        "First run: registering hooks for Claude Code and every detected coding agent (opencode, Codex, Copilot), then starting the menu bar daemon…\n"
+        "First run: registering hooks for Claude Code and every detected coding agent (opencode, Codex, Copilot, Cursor), then starting the menu bar daemon…\n"
     );
     if let Err(e) = install_hooks() {
         eprintln!(
