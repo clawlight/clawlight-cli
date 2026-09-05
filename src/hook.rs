@@ -84,17 +84,32 @@ pub fn run() -> anyhow::Result<()> {
 
     let status = match hook_event.as_str() {
         "SessionStart" | "UserPromptSubmit" | "PreToolUse" => Status::Active,
+        // PostToolUse is only ever a red-clearer (see `clears_red_only`).
+        "PostToolUse" => Status::Active,
         "Stop" => Status::Inactive,
-        "Notification" => {
-            // idle_prompt is an informational nudge, not a help request — skip
-            // it so the icon doesn't flip red on idle warnings.
-            if notification_type.as_deref() == Some("idle_prompt") {
-                return Ok(());
-            }
-            Status::NeedsHelp
-        }
+        "Notification" => match notification_kind(notification_type.as_deref()) {
+            NotificationKind::NeedsHelp => Status::NeedsHelp,
+            NotificationKind::Resolved => Status::Active,
+            NotificationKind::Ignore => return Ok(()),
+        },
         "SessionEnd" => Status::Done,
         _ => return Ok(()),
+    };
+
+    // Events that are evidence the user just dealt with a pending request —
+    // a tool completing after an approval, `auth_success` after a login
+    // prompt — but no evidence of activity on their own: a background task's
+    // PostToolUse can land after Stop, and `/login` can be typed at an idle
+    // prompt. They clear a red and otherwise write nothing.
+    let clears_red_only =
+        hook_event == "PostToolUse" || (hook_event == "Notification" && status == Status::Active);
+
+    // The notification type is only meaningful alongside NeedsHelp: a resolved
+    // session must not keep advertising the prompt it just cleared.
+    let notification_type = if status == Status::NeedsHelp {
+        notification_type
+    } else {
+        None
     };
 
     // Whether to kick off auto-naming after the write. Decided inside the RMW
@@ -103,6 +118,13 @@ pub fn run() -> anyhow::Result<()> {
     let mut spawn_naming = false;
 
     update_state(|state| {
+        if clears_red_only {
+            match state.sessions.get(&session_id) {
+                Some(s) if s.status == Status::NeedsHelp => {}
+                _ => return false,
+            }
+        }
+
         // PreToolUse fires very frequently; skip the write if already active.
         if hook_event == "PreToolUse" {
             if let Some(s) = state.sessions.get(&session_id) {
@@ -154,6 +176,45 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// How one Claude Code `Notification` bears on the session's status.
+enum NotificationKind {
+    /// The session is waiting on the user: flip red.
+    NeedsHelp,
+    /// The user just dealt with whatever the session was waiting on: clear a
+    /// pending red (and nothing else — see `clears_red_only` in [`run`]).
+    Resolved,
+    /// Informational; never touches status.
+    Ignore,
+}
+
+/// Classify a `Notification` by its `notification_type`. The documented
+/// vocabulary (Claude Code's hooks reference) splits three ways; anything
+/// undocumented — including a missing type from an older build — is treated
+/// as a help request, since a missed red is the failure the product exists to
+/// prevent, while the known informational and resolving types are named here
+/// explicitly so they can never leave a session stuck red.
+fn notification_kind(notification_type: Option<&str>) -> NotificationKind {
+    match notification_type {
+        // Nudges and progress reports, not requests for the user.
+        Some(
+            "idle_prompt"
+            | "agent_completed"
+            | "quota_auto_resume_fired"
+            | "quota_auto_resume_stale"
+            | "quota_auto_resume_disabled",
+        ) => NotificationKind::Ignore,
+        // `auth_success` follows a login prompt; the elicitation ones follow
+        // an `elicitation_dialog` the user answered. Without these a session
+        // that went red for a login stayed red until the next prompt.
+        Some("auth_success" | "elicitation_response" | "elicitation_complete") => {
+            NotificationKind::Resolved
+        }
+        // permission_prompt, elicitation_dialog, elicitation_url_dialog,
+        // agent_needs_input, and anything unknown.
+        _ => NotificationKind::NeedsHelp,
+    }
 }
 
 /// `clawlight event`: read one normalized harness event as JSON on stdin and
@@ -509,6 +570,64 @@ fn copilot_event_verb(event_name: &str) -> Option<&'static str> {
         "sessionEnd" => Some("ended"),
         _ => None,
     }
+}
+
+/// Cursor's native dialect carries the stable `conversation_id` on all hooks.
+/// `session_id` aliases it on lifecycle events; `generation_id` changes every
+/// turn and must never be used as the session key. See cursor.rs for wiring.
+pub fn run_cursor_hook() -> anyhow::Result<()> {
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    let v: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
+    let field = |key: &str| {
+        v.get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+    };
+    let event_name = field("hook_event_name").unwrap_or_default();
+    let event = match event_name {
+        "sessionStart" | "preToolUse" => "working",
+        "beforeSubmitPrompt" | "postToolUse" => "resumed",
+        "stop" => "idle",
+        "sessionEnd" => "ended",
+        // No documented approval-wait event. Tool hooks are not evidence of
+        // a permission prompt; subagent stops must not idle the parent either.
+        _ => return Ok(()),
+    };
+    let Some(session_id) = field("conversation_id").or_else(|| field("session_id")) else {
+        return Ok(());
+    };
+    // Prefer the workspace root over a tool's cwd (which may be a subfolder).
+    // Never use our process cwd: user hooks execute inside ~/.cursor/.
+    let directory = v
+        .get("workspace_roots")
+        .and_then(Value::as_array)
+        .and_then(|roots| {
+            roots
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|s| !s.trim().is_empty())
+        })
+        .or_else(|| field("cwd"));
+    ingest_event(&serde_json::json!({
+        "harness": "cursor",
+        "event": event,
+        "session_id": session_id,
+        "directory": directory,
+    }))?;
+    if event_name == "beforeSubmitPrompt" {
+        if let Some(prompt) = field("prompt") {
+            let name = crate::session::truncate(prompt.trim().lines().next().unwrap_or(""), 50);
+            update_state(|state| match state.sessions.get_mut(session_id) {
+                Some(s) if s.name.is_none() => {
+                    s.name = Some(name.clone());
+                    true
+                }
+                _ => false,
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// Sweep one harness's still-live sessions to `Done` on a harness restart.

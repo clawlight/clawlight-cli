@@ -11,13 +11,14 @@ use assert_cmd::Command;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-const HOOK_EVENTS: [&str; 6] = [
+const HOOK_EVENTS: [&str; 7] = [
     "SessionStart",
     "UserPromptSubmit",
     "Stop",
     "Notification",
     "SessionEnd",
     "PreToolUse",
+    "PostToolUse",
 ];
 
 fn run(home: &TempDir, subcommand: &str) {
@@ -35,15 +36,58 @@ fn read_settings(home: &TempDir) -> Value {
 }
 
 #[test]
+fn cursor_install_and_uninstall_preserve_existing_hooks() {
+    let home = TempDir::new().unwrap();
+    let dir = home.path().join(".cursor");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("hooks.json");
+    let foreign = json!({"version":1,"hooks":{"stop":[{"command":"./audit.sh"}]}});
+    std::fs::write(&path, foreign.to_string()).unwrap();
+    run(&home, "install");
+    let installed = std::fs::read_to_string(&path).unwrap();
+    let root: Value = serde_json::from_str(&installed).unwrap();
+    assert_eq!(root["hooks"]["stop"][0], foreign["hooks"]["stop"][0]);
+    for event in [
+        "sessionStart",
+        "beforeSubmitPrompt",
+        "preToolUse",
+        "postToolUse",
+        "stop",
+        "sessionEnd",
+    ] {
+        assert!(
+            root["hooks"][event].as_array().unwrap().last().unwrap()["command"]
+                .as_str()
+                .unwrap()
+                .ends_with(" cursor-hook")
+        );
+    }
+    run(&home, "install");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), installed);
+    run(&home, "uninstall");
+    let after: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(after, foreign);
+}
+
+#[test]
 fn install_registers_hooks_and_uninstall_reverts_them() {
     let home = TempDir::new().unwrap();
 
-    // Pre-existing user settings must survive both operations untouched.
+    // Pre-existing user settings — including the user's own hook on one of
+    // the events we register, and a stale registration of ours from an old
+    // install path — must survive both operations untouched.
+    let foreign =
+        json!({ "matcher": "Bash", "hooks": [{ "type": "command", "command": "./lint.sh" }] });
+    let stale = json!({ "hooks": [{ "type": "command", "command": "\"/old/clawlight\" hook" }] });
     let claude_dir = home.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::write(
         claude_dir.join("settings.json"),
-        json!({"model": "opus"}).to_string(),
+        json!({
+            "model": "opus",
+            "hooks": { "SessionStart": [stale, foreign.clone()] }
+        })
+        .to_string(),
     )
     .unwrap();
 
@@ -52,14 +96,26 @@ fn install_registers_hooks_and_uninstall_reverts_them() {
     let settings = read_settings(&home);
     assert_eq!(settings["model"], "opus");
     for hook_event in HOOK_EVENTS {
-        let command = settings["hooks"][hook_event][0]["hooks"][0]["command"]
-            .as_str()
+        let groups = settings["hooks"][hook_event]
+            .as_array()
             .unwrap_or_else(|| panic!("{hook_event} hook registered"));
+        let command = groups.last().unwrap()["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
         assert!(
             command.ends_with("\" hook"),
             "hook command invokes the binary: {command}"
         );
+        assert_eq!(
+            groups.len(),
+            if hook_event == "SessionStart" { 2 } else { 1 },
+            "{hook_event}: one group of ours, foreign groups kept, stale ones gone"
+        );
     }
+    assert_eq!(
+        settings["hooks"]["SessionStart"][0], foreign,
+        "foreign hook kept in place"
+    );
     let autostart = home.path().join(".config/autostart/clawlight.desktop");
     assert!(autostart.exists(), "XDG autostart entry written");
     assert!(claude_dir.join("clawlight").exists(), "state dir created");
@@ -68,9 +124,10 @@ fn install_registers_hooks_and_uninstall_reverts_them() {
 
     let settings = read_settings(&home);
     assert_eq!(settings["model"], "opus", "unrelated settings preserved");
-    assert!(
-        settings.get("hooks").is_none(),
-        "empty hooks object removed entirely"
+    assert_eq!(
+        settings["hooks"],
+        json!({ "SessionStart": [foreign] }),
+        "only the user's own hook survives; emptied events are dropped"
     );
     assert!(!autostart.exists(), "autostart entry removed");
     assert!(!claude_dir.join("clawlight").exists(), "state dir removed");

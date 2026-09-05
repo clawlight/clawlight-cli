@@ -2,6 +2,7 @@ mod app;
 mod codex;
 mod config;
 mod copilot;
+mod cursor;
 mod harness;
 mod hook;
 mod led;
@@ -34,7 +35,7 @@ use crate::app::App;
 #[derive(Parser)]
 #[command(
     name = "clawlight",
-    about = "TUI dashboard for Claude Code, opencode, Codex CLI, and GitHub Copilot CLI sessions"
+    about = "TUI dashboard for Claude Code, opencode, Codex CLI, GitHub Copilot CLI, and Cursor sessions"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -75,6 +76,9 @@ enum Commands {
     /// (internal) Codex hook shim: Claude-dialect payload → normalized event
     #[command(hide = true)]
     CodexHook,
+    /// (internal) Cursor native hook payload → normalized event
+    #[command(hide = true)]
+    CursorHook,
     /// (internal) Copilot hook shim: per-event payload → normalized event
     #[command(hide = true)]
     CopilotHook {
@@ -103,6 +107,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Hook) => hook::run(),
         Some(Commands::Event) => hook::run_event(),
         Some(Commands::CodexHook) => hook::run_codex_hook(),
+        Some(Commands::CursorHook) => hook::run_cursor_hook(),
         Some(Commands::CopilotHook { event }) => hook::run_copilot_hook(&event),
         Some(Commands::Name {
             session_id,
@@ -165,14 +170,83 @@ fn settings_path() -> PathBuf {
 
 /// Claude Code lifecycle events that clawlight's built-in hook backend
 /// registers for. Single source of truth shared by install and uninstall.
-const HOOK_EVENTS: [&str; 6] = [
+const HOOK_EVENTS: [&str; 7] = [
     "SessionStart",
     "UserPromptSubmit",
     "Stop",
     "Notification",
     "SessionEnd",
     "PreToolUse",
+    "PostToolUse",
 ];
+
+/// Whether a settings.json hook command is clawlight's own `hook` backend —
+/// any install path, quoted or bare, `.exe` or not. Used to find and replace
+/// our previous registration without touching anyone else's hooks.
+fn command_is_clawlight_hook(cmd: &str) -> bool {
+    let Some(exe) = cmd.trim().strip_suffix(" hook") else {
+        return false;
+    };
+    let exe = exe
+        .strip_prefix('"')
+        .and_then(|e| e.strip_suffix('"'))
+        .or_else(|| exe.strip_prefix('\'').and_then(|e| e.strip_suffix('\'')))
+        .unwrap_or(exe);
+    matches!(
+        exe.rsplit(['/', '\\']).next(),
+        Some("clawlight" | "clawlight.exe")
+    )
+}
+
+/// Strip clawlight's hook commands out of one event's matcher groups, leaving
+/// every foreign command — and every foreign group — exactly where it was. A
+/// group emptied by the removal goes too; a group that was already empty (or
+/// isn't ours to judge) stays. Returns whether anything was removed.
+fn remove_clawlight_hooks(groups: &mut Vec<serde_json::Value>) -> bool {
+    let mut removed = false;
+    groups.retain_mut(|group| {
+        let Some(hooks) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+            return true;
+        };
+        let before = hooks.len();
+        hooks.retain(|hook| {
+            !hook
+                .get("command")
+                .and_then(|c| c.as_str())
+                .is_some_and(command_is_clawlight_hook)
+        });
+        let changed = hooks.len() != before;
+        removed |= changed;
+        !(changed && hooks.is_empty())
+    });
+    removed
+}
+
+/// Merge clawlight's hook group into every lifecycle event of a settings.json
+/// `hooks` object: drop any earlier registration of ours (a stale install
+/// path), keep the user's own groups in place, append ours. Fails — writing
+/// nothing — if an event's entry isn't the array Claude Code expects.
+fn merge_clawlight_hooks(
+    hooks_obj: &mut serde_json::Map<String, serde_json::Value>,
+    hook_cmd: &str,
+) -> anyhow::Result<()> {
+    let hook_group = serde_json::json!({
+        "hooks": [{
+            "type": "command",
+            "command": hook_cmd
+        }]
+    });
+    for event in HOOK_EVENTS {
+        let groups = hooks_obj
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .with_context(|| format!("hooks.{event} must be an array"))?;
+        remove_clawlight_hooks(groups);
+        groups.push(hook_group.clone());
+    }
+    Ok(())
+}
 
 /// Register clawlight's native hook backend in ~/.claude/settings.json for every
 /// lifecycle event, and ensure the state/log dir exists. Idempotent. Does *not*
@@ -195,15 +269,6 @@ fn register_hooks() -> anyhow::Result<()> {
         serde_json::json!({})
     };
 
-    let hook_entry = serde_json::json!([
-        {
-            "hooks": [{
-                "type": "command",
-                "command": hook_cmd
-            }]
-        }
-    ]);
-
     let hooks = settings
         .as_object_mut()
         .context("settings.json must be an object")?
@@ -212,9 +277,9 @@ fn register_hooks() -> anyhow::Result<()> {
 
     let hooks_obj = hooks.as_object_mut().context("hooks must be an object")?;
 
-    for event in HOOK_EVENTS {
-        hooks_obj.insert(event.to_string(), hook_entry.clone());
-    }
+    // Merge, never replace: a user's own SessionStart/Stop/... hooks live in
+    // the same arrays and must survive every (re)install.
+    merge_clawlight_hooks(hooks_obj, &hook_cmd)?;
 
     let settings_str = serde_json::to_string_pretty(&settings)?;
     std::fs::write(&settings_file, settings_str)?;
@@ -244,7 +309,7 @@ fn install_hooks() -> anyhow::Result<()> {
     install_autostart()?;
 
     println!(
-        "\nInstallation complete! Hooks are now active for Claude Code and every detected coding agent (opencode, Codex, Copilot)."
+        "\nInstallation complete! Hooks are now active for Claude Code and every detected coding agent (opencode, Codex, Copilot, Cursor)."
     );
     println!("Run `clawlight` to launch the TUI dashboard.");
     if !lamp_enabled {
@@ -334,7 +399,7 @@ fn first_run_setup_tui() {
         return;
     }
     println!(
-        "First run: registering hooks for Claude Code and every detected coding agent (opencode, Codex, Copilot), then starting the menu bar daemon…\n"
+        "First run: registering hooks for Claude Code and every detected coding agent (opencode, Codex, Copilot, Cursor), then starting the menu bar daemon…\n"
     );
     if let Err(e) = install_hooks() {
         eprintln!(
@@ -373,8 +438,15 @@ fn uninstall_hooks() -> anyhow::Result<()> {
         let mut settings: serde_json::Value = serde_json::from_str(&content)?;
 
         if let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+            // Remove only our commands; a user's own hooks on the same events
+            // stay, and an event array is dropped only once it holds nothing.
             for event in HOOK_EVENTS {
-                hooks.remove(event);
+                if let Some(groups) = hooks.get_mut(event).and_then(|g| g.as_array_mut()) {
+                    remove_clawlight_hooks(groups);
+                    if groups.is_empty() {
+                        hooks.remove(event);
+                    }
+                }
             }
             if hooks.is_empty() {
                 settings.as_object_mut().unwrap().remove("hooks");
@@ -685,4 +757,94 @@ fn uninstall_xdg_autostart() -> anyhow::Result<()> {
         "Note: a running tray icon stays until you quit it (tray menu \u{2192} Quit) or log out."
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn clawlight_hook_commands_recognized_foreign_ones_not() {
+        for cmd in [
+            "clawlight hook",
+            "\"/Users/me/.cargo/bin/clawlight\" hook",
+            "'/opt/claw light/clawlight' hook",
+            "\"C:\\Program Files\\clawlight.exe\" hook",
+            "  clawlight.exe hook ",
+        ] {
+            assert!(command_is_clawlight_hook(cmd), "{cmd}");
+        }
+        for cmd in [
+            "my-clawlight hook",
+            "\"/x/clawlight\" codex-hook",
+            "clawlight",
+            "./hook.sh",
+            "echo clawlight hook",
+            "\"/x/clawlight\" hook --verbose",
+        ] {
+            assert!(!command_is_clawlight_hook(cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn merge_keeps_foreign_hooks_and_replaces_a_stale_registration() {
+        let foreign =
+            json!({ "matcher": "Bash", "hooks": [{ "type": "command", "command": "./lint.sh" }] });
+        let mixed = json!({ "hooks": [
+            { "type": "command", "command": "\"/old/clawlight\" hook" },
+            { "type": "command", "command": "./audit.sh" },
+        ] });
+        let mut hooks = json!({
+            "SessionStart": [ { "hooks": [{ "type": "command", "command": "\"/old/clawlight\" hook" }] }, foreign.clone() ],
+            "Stop": [ mixed ],
+            "PreCompact": [ foreign.clone() ],
+        });
+        let obj = hooks.as_object_mut().unwrap();
+
+        merge_clawlight_hooks(obj, "\"/new/clawlight\" hook").unwrap();
+        let ours =
+            json!({ "hooks": [{ "type": "command", "command": "\"/new/clawlight\" hook" }] });
+        assert_eq!(obj["SessionStart"], json!([foreign, ours]));
+        assert_eq!(
+            obj["Stop"],
+            json!([{ "hooks": [{ "type": "command", "command": "./audit.sh" }] }, ours])
+        );
+        for event in HOOK_EVENTS {
+            let groups = obj[event].as_array().unwrap();
+            assert_eq!(groups.last().unwrap(), &ours, "{event}");
+        }
+        assert_eq!(
+            obj["PreCompact"],
+            json!([foreign]),
+            "unregistered events untouched"
+        );
+
+        // A second merge is a no-op.
+        let before = hooks.clone();
+        merge_clawlight_hooks(hooks.as_object_mut().unwrap(), "\"/new/clawlight\" hook").unwrap();
+        assert_eq!(hooks, before);
+
+        // Removal leaves exactly the foreign hooks behind.
+        let obj = hooks.as_object_mut().unwrap();
+        for event in HOOK_EVENTS {
+            let groups = obj.get_mut(event).unwrap().as_array_mut().unwrap();
+            assert!(remove_clawlight_hooks(groups), "{event}");
+        }
+        assert_eq!(obj["SessionStart"], json!([foreign]));
+        assert_eq!(
+            obj["Stop"],
+            json!([{ "hooks": [{ "type": "command", "command": "./audit.sh" }] }])
+        );
+        assert_eq!(obj["Notification"], json!([]));
+        assert!(!remove_clawlight_hooks(
+            obj["Notification"].as_array_mut().unwrap()
+        ));
+    }
+
+    #[test]
+    fn merge_refuses_a_malformed_event_entry() {
+        let mut hooks = json!({ "Stop": { "not": "an array" } });
+        assert!(merge_clawlight_hooks(hooks.as_object_mut().unwrap(), "clawlight hook").is_err());
+    }
 }

@@ -53,6 +53,7 @@ serial port. Redeploy the installed one instead.
 | `event` *(hidden)* | Normalized-event backend for non-Claude harnesses (opencode); reads one event as JSON on stdin |
 | `codex-hook` *(hidden)* | Codex shim: reads one Claude-dialect hook payload on stdin, maps it to a normalized event |
 | `copilot-hook <event>` *(hidden)* | Copilot shim: reads one per-event payload on stdin (the event name rides on argv), maps it to a normalized event |
+| `cursor-hook` *(hidden)* | Cursor shim: reads a native hook payload on stdin and maps its `hook_event_name` and `conversation_id` to a normalized event |
 | `name <id> <transcript>` *(hidden)* | Detached auto-namer; titles a session via the `claude` CLI |
 
 ## Module map (src/)
@@ -106,8 +107,25 @@ watch that file (via `notify`) and re-render on change. Status mapping:
 
 - `SessionStart` / `UserPromptSubmit` / `PreToolUse` → `Active`
 - `Stop` → `Inactive`
-- `Notification` → `NeedsHelp` (except `idle_prompt`, which is ignored)
+- `Notification` → by `notification_type` (`notification_kind` in hook.rs):
+  `permission_prompt`, `elicitation_dialog`, `elicitation_url_dialog`,
+  `agent_needs_input`, and any unknown/missing type → `NeedsHelp`;
+  `auth_success`, `elicitation_response`, `elicitation_complete` → *clear* a
+  pending `NeedsHelp` to `Active` (a login or answered dialog resolves the red);
+  `idle_prompt`, `agent_completed`, `quota_auto_resume_*` → ignored.
+- `PostToolUse` → clears a pending `NeedsHelp` to `Active` (the tool ran, so the
+  permission was granted). Like the resolving notifications above it is a
+  **red-clearer only**: on an `Inactive`/unseen session it writes nothing, because
+  a background task's PostToolUse can land after `Stop`, and `/login` can be typed
+  at an idle prompt. Never let these flip an idle session green.
 - `SessionEnd` → `Done`
+
+Claude hooks are registered by **merging** into `~/.claude/settings.json`
+(`merge_clawlight_hooks` in main.rs): each event's array keeps the user's own
+matcher groups in place, any earlier clawlight command (a stale install path) is
+stripped, and one group of ours is appended. Uninstall removes only our commands
+and drops an event key only once its array is empty. Never `insert` a whole event
+array — that silently deleted a user's own `SessionStart`/`Stop` hooks.
 
 Aggregate health for the icon/LED: any `NeedsHelp` → Red; then the `yellow_mode` config
 (set in the popover's Settings view) decides mixed states — `any_inactive` (default):
@@ -189,6 +207,17 @@ thin:
   names the session once; never an LLM call, never a file read. Ownership of
   `clawlight.json` is the `copilot-hook` command string inside it (JSON has no
   comments), guarding both the install overwrite and the uninstall delete.
+- **Cursor needs no plugin.** `cursor.rs` merges command entries into the shared
+  `~/.cursor/hooks.json` (schema version 1), preserving foreign hooks and refusing
+  unreadable or unsupported configuration. Detection uses `~/.cursor`, `cursor`,
+  or `cursor-agent` on PATH; the badge is `cu`. `clawlight cursor-hook` consumes
+  native camelCase `hook_event_name`: `sessionStart`/`preToolUse` → `working`,
+  `beforeSubmitPrompt`/`postToolUse` → `resumed`, `stop` → `idle`, `sessionEnd` →
+  `ended`. Use stable `conversation_id` (`session_id` fallback), never the per-turn
+  `generation_id`. First prompt names once, workspace roots supply the project.
+  There is no documented approval-wait event, so no inferred red on tool calls.
+  Tab/subagent hooks are ignored; no transcript, credential, or usage reads.
+  User hooks are local only; Cursor watches the config and reloads it on save.
 - **Shutdown** (opencode has no per-session exit event) is handled in three layers: the
   plugin's `process.on("exit")` emits `ended`; the `reconnected` sweep is the backstop; and,
   because `run_event` captures the host terminal's `owner_pid` on first sighting, the existing

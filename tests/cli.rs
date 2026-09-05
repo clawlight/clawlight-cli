@@ -17,7 +17,7 @@ fn help_lists_the_public_subcommands() {
         assert!(stdout.contains(subcommand), "--help mentions {subcommand}");
     }
     // Internal backends stay hidden from users.
-    for hidden in ["hook", "name"] {
+    for hidden in ["hook", "name", "cursor-hook"] {
         assert!(
             !stdout.contains(&format!("\n  {hidden}")),
             "{hidden} is hidden"
@@ -65,6 +65,16 @@ fn the_copilot_shim_exits_cleanly_on_junk_input() {
         cmd.env("HOME", "/nonexistent-clawlight-test-home");
         cmd.assert().success();
     }
+}
+
+#[test]
+fn the_cursor_shim_exits_cleanly_on_junk_input() {
+    clawlight()
+        .arg("cursor-hook")
+        .write_stdin("not json {{{")
+        .assert()
+        .success()
+        .stdout("");
 }
 
 #[test]

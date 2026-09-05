@@ -3,7 +3,7 @@
 //! clawlight mirrors more than one coding agent. Claude Code is the built-in
 //! default — its sessions carry no `harness` tag and use the native hook
 //! backend, so it has no entry here. Every *other* agent (opencode, Codex CLI,
-//! GitHub Copilot CLI) is one [`Adapter`]: its detection, its plugin/hook
+//! GitHub Copilot CLI, Cursor) is one [`Adapter`]: its detection, its plugin/hook
 //! install + uninstall, and its UI badge, all behind one small table.
 //!
 //! Everything harness-specific lives here, so adding the next harness is a
@@ -34,7 +34,12 @@ pub struct Adapter {
 
 /// Every non-Claude harness clawlight supports. Add an entry (and its asset) to
 /// support a new one — nothing else in the codebase needs to change.
-pub const ADAPTERS: &[Adapter] = &[opencode::ADAPTER, codex::ADAPTER, copilot::ADAPTER];
+pub const ADAPTERS: &[Adapter] = &[
+    opencode::ADAPTER,
+    codex::ADAPTER,
+    copilot::ADAPTER,
+    cursor::ADAPTER,
+];
 
 /// Set up every *detected* harness's wiring. Best-effort per adapter: a failure
 /// to write one never blocks the others or the Claude hook registration.
@@ -284,6 +289,22 @@ pub mod copilot {
     }
 }
 
+pub mod cursor {
+    pub const ADAPTER: super::Adapter = super::Adapter {
+        name: "cursor",
+        badge: "cu",
+        detected,
+        install: crate::cursor::install_hooks,
+        uninstall: crate::cursor::uninstall_hooks,
+    };
+
+    fn detected() -> bool {
+        crate::cursor::config_dir().is_some_and(|p| p.exists())
+            || super::is_on_path("cursor")
+            || super::is_on_path("cursor-agent")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +314,7 @@ mod tests {
         assert_eq!(badge("opencode"), "oc");
         assert_eq!(badge("codex"), "cx");
         assert_eq!(badge("copilot"), "co");
+        assert_eq!(badge("cursor"), "cu");
         // An unknown/future harness (e.g. a session written by a newer build)
         // still renders a non-empty tag rather than blank.
         assert_eq!(badge("mystery"), "my");

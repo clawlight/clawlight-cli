@@ -2,13 +2,14 @@
 
 <img width="1164" height="655" alt="claw-light-gif" src="https://github.com/user-attachments/assets/3e148527-169f-4f36-b2cd-0bcc3160527b" />
 
-**The simple way to manage your Claude Code, opencode, Codex, and Copilot
+**The simple way to manage your Claude Code, opencode, Codex, Copilot, and Cursor
 sessions.**
 
 clawlight is a TUI dashboard and menu bar / system tray indicator for
 monitoring [Claude Code](https://claude.ai/code), [opencode](https://opencode.ai),
-[Codex CLI](https://github.com/openai/codex), and
-[GitHub Copilot CLI](https://github.com/github/copilot-cli) sessions in real
+[Codex CLI](https://github.com/openai/codex),
+[GitHub Copilot CLI](https://github.com/github/copilot-cli), and
+[Cursor](https://cursor.com) sessions in real
 time, all in the same dashboard.
 
 
@@ -24,6 +25,13 @@ detection-gated: clawlight only wires up an agent it finds installed, and
 | [opencode](https://opencode.ai) | plugin written to `~/.config/opencode/plugins/` | `oc` | restart running sessions after install |
 | [Codex CLI](https://github.com/openai/codex) | hooks in `$CODEX_HOME/hooks.json` | `cx` | needs Codex >= 0.144; one-time approval via `/hooks` inside Codex |
 | [GitHub Copilot CLI](https://github.com/github/copilot-cli) | owned file at `~/.copilot/hooks/clawlight.json` | `co` | sessions appear on first prompt; restart sessions open during install |
+| [Cursor](https://cursor.com) | hooks merged into `~/.cursor/hooks.json` | `cu` | local Agent sessions; send a prompt after install; hooks reload automatically |
+
+Cursor sessions use the first prompt as their name and track working, idle, and
+ended states through [native hooks](https://cursor.com/docs/hooks). Cursor has no
+documented approval-wait hook, so waiting for approval is not shown as red.
+Existing hooks are preserved during install/uninstall. User hooks apply locally;
+remote Cloud Agents do not load this machine's `~/.cursor/hooks.json`.
 
 <p align="center">
   <img src="docs/screenshots/opencode-tui.png" width="800" alt="clawlight TUI dashboard showing a mixed Claude Code + opencode session list, with the oc badge marking opencode sessions" />
@@ -36,8 +44,8 @@ detection-gated: clawlight only wires up an agent it finds installed, and
 
 ## Features
 
-- **TUI dashboard**: live view of every Claude Code, opencode, Codex CLI, and
-  GitHub Copilot CLI session with status (working, idle, needs help),
+- **TUI dashboard**: live view of every Claude Code, opencode, Codex CLI,
+  GitHub Copilot CLI, and Cursor session with status (working, idle, needs help),
   updating in real time via file watching
 - **Jump to session**: press `↵` in the TUI (or click a session in the
   tray popover) and clawlight raises the exact terminal window or tab
@@ -108,7 +116,7 @@ cargo install --path .
 
 ```bash
 # Install hooks for Claude Code and every detected coding agent (opencode,
-# Codex, Copilot), then start the tray daemon
+# Codex, Copilot, Cursor), then start the tray daemon
 clawlight install
 
 # Launch the TUI dashboard
