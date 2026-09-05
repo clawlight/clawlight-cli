@@ -117,6 +117,152 @@ fn idle_prompt_notification_is_ignored() {
     assert_eq!(session_status(&read_state(&home), "sess-idle"), "active");
 }
 
+/// A session parked on a help request, as a `permission_prompt` (or a login
+/// prompt) leaves it.
+fn seed_needs_help(home: &TempDir, session_id: &str) {
+    seed_state(
+        home,
+        &json!({
+            "sessions": {
+                session_id: {
+                    "status": "needs_help",
+                    "last_updated": "2020-01-01T00:00:00Z",
+                    "project_path": null,
+                    "notification_type": "permission_prompt",
+                    "name": "Fix the build",
+                }
+            }
+        }),
+    );
+}
+
+fn notification(session_id: &str, notification_type: &str) -> String {
+    json!({
+        "hook_event_name": "Notification",
+        "session_id": session_id,
+        "cwd": "/tmp/some-project",
+        "notification_type": notification_type,
+    })
+    .to_string()
+}
+
+#[test]
+fn informational_notifications_never_touch_status() {
+    let home = temp_home();
+    run_hook(&home, &event("SessionStart", "sess-info")).success();
+    run_hook(&home, &event("Stop", "sess-info")).success();
+
+    for kind in [
+        "idle_prompt",
+        "agent_completed",
+        "quota_auto_resume_fired",
+        "quota_auto_resume_stale",
+        "quota_auto_resume_disabled",
+    ] {
+        run_hook(&home, &notification("sess-info", kind)).success();
+        assert_eq!(
+            session_status(&read_state(&home), "sess-info"),
+            "inactive",
+            "{kind} must not flip an idle session"
+        );
+    }
+}
+
+#[test]
+fn help_requests_and_unknown_notification_types_go_red() {
+    let home = temp_home();
+    for kind in [
+        "permission_prompt",
+        "elicitation_dialog",
+        "elicitation_url_dialog",
+        "agent_needs_input",
+        "some_future_type",
+    ] {
+        run_hook(&home, &event("SessionStart", "sess-red")).success();
+        run_hook(&home, &notification("sess-red", kind)).success();
+        let state = read_state(&home);
+        assert_eq!(session_status(&state, "sess-red"), "needs_help", "{kind}");
+        assert_eq!(state["sessions"]["sess-red"]["notification_type"], kind);
+    }
+}
+
+#[test]
+fn auth_success_clears_a_pending_red() {
+    // The reported bug: a session that went red for a login stayed red after
+    // the login succeeded, until the next prompt was typed.
+    let home = temp_home();
+    seed_needs_help(&home, "sess-login");
+
+    run_hook(&home, &notification("sess-login", "auth_success")).success();
+
+    let state = read_state(&home);
+    assert_eq!(session_status(&state, "sess-login"), "active");
+    assert_eq!(
+        state["sessions"]["sess-login"]["notification_type"],
+        Value::Null
+    );
+    assert_eq!(state["sessions"]["sess-login"]["name"], "Fix the build");
+}
+
+#[test]
+fn elicitation_answers_clear_a_pending_red() {
+    for kind in ["elicitation_response", "elicitation_complete"] {
+        let home = temp_home();
+        seed_needs_help(&home, "sess-elicit");
+        run_hook(&home, &notification("sess-elicit", kind)).success();
+        assert_eq!(
+            session_status(&read_state(&home), "sess-elicit"),
+            "active",
+            "{kind}"
+        );
+    }
+}
+
+#[test]
+fn resolving_notifications_never_activate_an_idle_or_unknown_session() {
+    // `/login` typed at an idle prompt fires auth_success too: the session is
+    // still idle, and must stay yellow rather than flip green.
+    let home = temp_home();
+    run_hook(&home, &event("SessionStart", "sess-idle-login")).success();
+    run_hook(&home, &event("Stop", "sess-idle-login")).success();
+    let before = read_state(&home);
+
+    run_hook(&home, &notification("sess-idle-login", "auth_success")).success();
+    assert_eq!(read_state(&home), before, "no write for an idle session");
+
+    run_hook(&home, &notification("sess-never-seen", "auth_success")).success();
+    assert!(
+        read_state(&home)["sessions"]
+            .get("sess-never-seen")
+            .is_none(),
+        "no ghost row for an unseen session"
+    );
+}
+
+#[test]
+fn post_tool_use_clears_a_pending_red_and_nothing_else() {
+    // Approving a permission runs the tool; its completion is the first
+    // event after the approval, and must clear the red even when no further
+    // PreToolUse or Stop follows for a while.
+    let home = temp_home();
+    seed_needs_help(&home, "sess-approved");
+    run_hook(&home, &event("PostToolUse", "sess-approved")).success();
+    assert_eq!(
+        session_status(&read_state(&home), "sess-approved"),
+        "active"
+    );
+
+    // But a tool finishing on its own (a background task landing after Stop)
+    // is not evidence the session is working again.
+    run_hook(&home, &event("Stop", "sess-approved")).success();
+    let before = read_state(&home);
+    run_hook(&home, &event("PostToolUse", "sess-approved")).success();
+    assert_eq!(read_state(&home), before);
+
+    run_hook(&home, &event("PostToolUse", "sess-unseen")).success();
+    assert!(read_state(&home)["sessions"].get("sess-unseen").is_none());
+}
+
 #[test]
 fn pre_tool_use_skips_the_write_when_already_active() {
     let home = temp_home();

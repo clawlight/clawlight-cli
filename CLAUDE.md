@@ -107,8 +107,25 @@ watch that file (via `notify`) and re-render on change. Status mapping:
 
 - `SessionStart` / `UserPromptSubmit` / `PreToolUse` → `Active`
 - `Stop` → `Inactive`
-- `Notification` → `NeedsHelp` (except `idle_prompt`, which is ignored)
+- `Notification` → by `notification_type` (`notification_kind` in hook.rs):
+  `permission_prompt`, `elicitation_dialog`, `elicitation_url_dialog`,
+  `agent_needs_input`, and any unknown/missing type → `NeedsHelp`;
+  `auth_success`, `elicitation_response`, `elicitation_complete` → *clear* a
+  pending `NeedsHelp` to `Active` (a login or answered dialog resolves the red);
+  `idle_prompt`, `agent_completed`, `quota_auto_resume_*` → ignored.
+- `PostToolUse` → clears a pending `NeedsHelp` to `Active` (the tool ran, so the
+  permission was granted). Like the resolving notifications above it is a
+  **red-clearer only**: on an `Inactive`/unseen session it writes nothing, because
+  a background task's PostToolUse can land after `Stop`, and `/login` can be typed
+  at an idle prompt. Never let these flip an idle session green.
 - `SessionEnd` → `Done`
+
+Claude hooks are registered by **merging** into `~/.claude/settings.json`
+(`merge_clawlight_hooks` in main.rs): each event's array keeps the user's own
+matcher groups in place, any earlier clawlight command (a stale install path) is
+stripped, and one group of ours is appended. Uninstall removes only our commands
+and drops an event key only once its array is empty. Never `insert` a whole event
+array — that silently deleted a user's own `SessionStart`/`Stop` hooks.
 
 Aggregate health for the icon/LED: any `NeedsHelp` → Red; then the `yellow_mode` config
 (set in the popover's Settings view) decides mixed states — `any_inactive` (default):
