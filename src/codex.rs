@@ -194,7 +194,11 @@ fn command_is_clawlight(cmd: &str) -> bool {
 
 /// A matcher group is ours only when *every* hook in it is clawlight's — a
 /// group mixing in anyone else's command is never replaced or removed.
-fn group_is_clawlight(group: &Value) -> bool {
+///
+/// Shared with the Claude Code path in `main.rs`: [`command_is_clawlight`]
+/// already matches both the `codex-hook` and the plain `hook` subcommands, so
+/// the same ownership test governs every shared hooks file clawlight writes.
+pub(crate) fn group_is_clawlight(group: &Value) -> bool {
     let Some(hooks) = group.get("hooks").and_then(|h| h.as_array()) else {
         return false;
     };
