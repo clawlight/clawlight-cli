@@ -28,7 +28,7 @@ dirs = "5"
 notify = "6"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-tray-icon = "0.19"
+tray-icon = "0.26"
 tao = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }
 serialport = "4"
