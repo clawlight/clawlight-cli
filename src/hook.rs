@@ -597,7 +597,13 @@ pub fn run_namer(session_id: &str, transcript_path: &str) -> anyhow::Result<()> 
 fn run_claude_cli(prompt: &str) -> std::io::Result<std::process::Output> {
     let build = |program: &str| {
         let mut cmd = std::process::Command::new(program);
-        cmd.args(["-p", "--model", "haiku", prompt])
+        // No tools and no MCP servers, so the call ends after one text reply. Inside a
+        // session routed to another model (an Ownlight local session sets
+        // ANTHROPIC_DEFAULT_HAIKU_MODEL) that model can otherwise act on the quoted
+        // request and run for hours. `--tools` takes several values, so another
+        // flag must follow it before the prompt.
+        cmd.args(["-p", "--tools", "", "--strict-mcp-config"]);
+        cmd.args(["--model", "haiku", prompt])
             // CLAWLIGHT_NAMING tells the hooks fired by this nested call to no-op.
             .env("CLAWLIGHT_NAMING", "1")
             // The old bash hook did `unset CLAUDECODE` before invoking a nested
