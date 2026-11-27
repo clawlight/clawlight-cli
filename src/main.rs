@@ -195,14 +195,12 @@ fn register_hooks() -> anyhow::Result<()> {
         serde_json::json!({})
     };
 
-    let hook_entry = serde_json::json!([
-        {
-            "hooks": [{
-                "type": "command",
-                "command": hook_cmd
-            }]
-        }
-    ]);
+    let hook_group = serde_json::json!({
+        "hooks": [{
+            "type": "command",
+            "command": hook_cmd
+        }]
+    });
 
     let hooks = settings
         .as_object_mut()
@@ -212,8 +210,24 @@ fn register_hooks() -> anyhow::Result<()> {
 
     let hooks_obj = hooks.as_object_mut().context("hooks must be an object")?;
 
+    // Merge, never replace: `settings.json` is shared with the user's own hooks
+    // (and other tools'), so an event we register for may already hold entries
+    // that are none of our business. Refresh our group in place when it's
+    // already there — that keeps re-installs idempotent and picks up a moved
+    // binary — and append otherwise.
     for event in HOOK_EVENTS {
-        hooks_obj.insert(event.to_string(), hook_entry.clone());
+        let entry = hooks_obj
+            .entry(event.to_string())
+            .or_insert_with(|| serde_json::json!([]));
+        let Some(groups) = entry.as_array_mut() else {
+            // A non-array under an event key isn't something we wrote and isn't
+            // a shape we understand; leave it exactly as found.
+            continue;
+        };
+        match groups.iter_mut().find(|g| codex::group_is_clawlight(g)) {
+            Some(ours) => ours.clone_from(&hook_group),
+            None => groups.push(hook_group.clone()),
+        }
     }
 
     let settings_str = serde_json::to_string_pretty(&settings)?;
@@ -373,8 +387,17 @@ fn uninstall_hooks() -> anyhow::Result<()> {
         let mut settings: serde_json::Value = serde_json::from_str(&content)?;
 
         if let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+            // Strip only our own groups. Dropping the whole event would take the
+            // user's hooks with it — `PreToolUse` in particular is where people
+            // put command guards and secret protection.
             for event in HOOK_EVENTS {
-                hooks.remove(event);
+                let Some(groups) = hooks.get_mut(event).and_then(|v| v.as_array_mut()) else {
+                    continue;
+                };
+                groups.retain(|g| !codex::group_is_clawlight(g));
+                if groups.is_empty() {
+                    hooks.remove(event);
+                }
             }
             if hooks.is_empty() {
                 settings.as_object_mut().unwrap().remove("hooks");

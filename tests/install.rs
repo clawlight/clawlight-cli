@@ -77,6 +77,74 @@ fn install_registers_hooks_and_uninstall_reverts_them() {
 }
 
 #[test]
+fn install_leaves_foreign_claude_hooks_alone_and_uninstall_keeps_them() {
+    let home = TempDir::new().unwrap();
+    let claude_dir = home.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+
+    // A user hook on an event clawlight also registers for, and one on an event
+    // it never touches. Both must survive install *and* uninstall.
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{ "type": "command", "command": "~/guard.sh" }]
+                }],
+                "PostToolUse": [{
+                    "matcher": "Write|Edit",
+                    "hooks": [{ "type": "command", "command": "~/sync.sh" }]
+                }]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    run(&home, "install");
+
+    let settings = read_settings(&home);
+    let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(pre.len(), 2, "user's group kept, ours appended: {pre:?}");
+    assert_eq!(pre[0]["matcher"], "Bash", "user's group untouched");
+    assert_eq!(pre[0]["hooks"][0]["command"], "~/guard.sh");
+    assert!(
+        pre[1]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("\" hook"),
+        "clawlight's group appended: {pre:?}"
+    );
+    assert_eq!(
+        settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "~/sync.sh",
+        "an event clawlight doesn't register for is never rewritten"
+    );
+
+    // Re-installing must refresh our group in place, not stack duplicates.
+    run(&home, "install");
+    assert_eq!(
+        read_settings(&home)["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "re-install is idempotent"
+    );
+
+    run(&home, "uninstall");
+
+    let settings = read_settings(&home);
+    let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(pre.len(), 1, "only clawlight's group removed: {pre:?}");
+    assert_eq!(pre[0]["hooks"][0]["command"], "~/guard.sh");
+    assert_eq!(
+        settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "~/sync.sh",
+        "untouched event survives uninstall"
+    );
+}
+
+#[test]
 fn install_writes_the_opencode_plugin_when_detected_and_uninstall_removes_it() {
     let home = TempDir::new().unwrap();
     // opencode "present": its global config dir exists (one of the two detection
