@@ -88,6 +88,11 @@ serial port. Redeploy the installed one instead.
 - **app.rs** — TUI event loop: file watcher + 5s timer refresh, key handling, notifications.
 - **ui.rs** — ratatui rendering of the table and status bar.
 - **menubar.rs** — tray icon + menu (tao/tray-icon event loop), spawns the LED daemon thread.
+- **tray_badge.rs** — Windows-only use, platform-neutral code: paints the usage readout
+  into the tray icon bitmap (shrunk mascot on top, digits from two embedded pixel fonts
+  on a dark strip below), since a Windows tray icon has no text slot like macOS's
+  `set_title`. Compiled under `cfg(any(windows, test))` so its tests run everywhere;
+  `CLAWLIGHT_BADGE_PREVIEW=<dir> cargo test badge_preview` dumps PNGs to eyeball.
 - **led.rs** — ESP32 detection by USB VID and the serial LED driver (`run` / `run_daemon`).
 - **ota.rs** — host side of the stop-and-wait serial firmware update protocol.
 - **notification.rs** — desktop notifications (macOS `osascript`; else `notify-rust`).
