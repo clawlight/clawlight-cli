@@ -14,6 +14,10 @@ mod session;
 mod spawn;
 mod state;
 mod terminal;
+// Only the Windows tray draws its readout into the icon; the renderer is
+// platform-neutral pixel work, so its tests run everywhere.
+#[cfg(any(target_os = "windows", test))]
+mod tray_badge;
 mod ui;
 mod usage;
 

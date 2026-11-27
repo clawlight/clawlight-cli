@@ -33,13 +33,11 @@ pub(crate) const ICON_RED: &[u8] = include_bytes!("../assets/icons/clawd-red.png
 pub(crate) const ICON_NONE: &[u8] = include_bytes!("../assets/icons/clawd-none.png");
 
 /// Tray icon for the current hook state, resolving inactive-vs-active through
-/// the user's yellow-mode setting.
+/// the user's yellow-mode setting. On Windows the usage readout (when on) is
+/// drawn into the icon too — see `with_readout`.
 fn icon_for_state(state: &HookState) -> anyhow::Result<Icon> {
-    icon_for(aggregate(state, config::read_config().yellow_mode))
-}
-
-fn icon_for(agg: Aggregate) -> anyhow::Result<Icon> {
-    let bytes = match agg {
+    let cfg = config::read_config();
+    let bytes = match aggregate(state, cfg.yellow_mode) {
         Aggregate::Red => ICON_RED,
         Aggregate::Yellow => ICON_YELLOW,
         Aggregate::Green => ICON_GREEN,
@@ -47,8 +45,29 @@ fn icon_for(agg: Aggregate) -> anyhow::Result<Icon> {
     };
     let img = image::load_from_memory(bytes).context("Decoding embedded icon PNG")?;
     let rgba = img.to_rgba8();
+    #[cfg(target_os = "windows")]
+    let rgba = with_readout(rgba, &cfg);
     let (w, h) = rgba.dimensions();
     Icon::from_rgba(rgba.into_raw(), w, h).context("Building tray icon")
+}
+
+/// Windows has no text slot beside a tray icon (macOS's `set_title`), so the
+/// readout is painted into the bitmap, rendered at the notification area's
+/// exact pixel size so the shell doesn't rescale the digits into a blur.
+/// Returns the plain mascot when there's no readout or it can't be drawn.
+#[cfg(target_os = "windows")]
+fn with_readout(mascot: image::RgbaImage, cfg: &config::Config) -> image::RgbaImage {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON};
+
+    let Some(text) = readout_text(cfg) else {
+        return mascot;
+    };
+    // Small-icon size at the current scaling: 16px at 100%, 24px at 150%, ….
+    // Queried per draw (it's cheap) so a scaling change is picked up.
+    let size = u32::try_from(unsafe { GetSystemMetrics(SM_CXSMICON) })
+        .unwrap_or(16)
+        .clamp(16, 64);
+    crate::tray_badge::compose(&mascot, &crate::tray_badge::compact(&text), size).unwrap_or(mascot)
 }
 
 // ---------------------------------------------------------------------------
@@ -327,25 +346,34 @@ fn usage_readout(mode: BillingMode) -> Option<String> {
     }
 }
 
-/// Put the readout where the platform can show it: next to the menu bar icon
-/// on macOS (design 1a), in the tray tooltip on Windows (design 1c). Shows
-/// nothing while usage tracking is off (the opt-in default).
+/// The readout to show right now: nothing while usage tracking is off (the
+/// opt-in default), whatever the cached snapshot says.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn apply_readout(tray: &tray_icon::TrayIcon) {
-    let cfg = config::read_config();
-    let text = cfg
-        .usage_enabled
+fn readout_text(cfg: &config::Config) -> Option<String> {
+    cfg.usage_enabled
         .then(|| usage_readout(cfg.billing_mode))
-        .flatten();
+        .flatten()
+}
+
+/// Put the readout where the platform can show it: next to the menu bar icon
+/// on macOS (design 1a); on Windows (design 1c) drawn into the tray icon in
+/// compact form, with the exact figure in the tooltip. `state` is only needed
+/// on Windows, where the readout is part of the state-colored icon.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg_attr(target_os = "macos", allow(unused_variables))]
+fn apply_readout(tray: &tray_icon::TrayIcon, state: &HookState) {
     #[cfg(target_os = "macos")]
-    tray.set_title(text.as_deref());
+    tray.set_title(readout_text(&config::read_config()).as_deref());
     #[cfg(target_os = "windows")]
     {
-        let tooltip = match text {
+        let tooltip = match readout_text(&config::read_config()) {
             Some(t) => format!("clawlight — {t}"),
             None => "clawlight".to_string(),
         };
         let _ = tray.set_tooltip(Some(tooltip));
+        if let Ok(icon) = icon_for_state(state) {
+            let _ = tray.set_icon(Some(icon));
+        }
     }
 }
 
@@ -570,12 +598,13 @@ pub fn run() -> anyhow::Result<()> {
             }
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             Event::UserEvent(UserEvent::UsageChanged) => {
+                let state = read_hook_state();
                 if let Some(tray) = tray_holder.as_ref() {
-                    apply_readout(tray);
+                    apply_readout(tray, &state);
                 }
                 // The popover payload embeds the snapshot; refresh it so an
                 // open popover's usage section tracks the readout.
-                popover.push_state(&read_hook_state());
+                popover.push_state(&state);
             }
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             Event::UserEvent(UserEvent::Tray(TrayIconEvent::Click {
@@ -636,10 +665,11 @@ pub fn run() -> anyhow::Result<()> {
                     // immediately. When enabling, the readout stays blank until
                     // the first scan lands (seconds later); when disabling, it
                     // clears now instead of waiting for the refresher.
+                    let state = read_hook_state();
                     if let Some(tray) = tray_holder.as_ref() {
-                        apply_readout(tray);
+                        apply_readout(tray, &state);
                     }
-                    popover.push_state(&read_hook_state());
+                    popover.push_state(&state);
                 }
                 PopoverMsg::SetLed { enabled } => {
                     let mut cfg = config::read_config();
