@@ -589,6 +589,30 @@ impl Rates {
     }
 }
 
+// Claude list prices: https://platform.claude.com/docs/en/about-claude/pricing
+// (checked 2026-11-27). Cache reads are 0.1x input on most models, 0.05x on
+// Opus/Sonnet 5.5 and 0.025x on Fable/Mythos 5.1 and 5.2.
+const FABLE_52: Rates = Rates {
+    input: 8.0,
+    output: 40.0,
+    cache_read: 0.20,
+};
+const FABLE_51: Rates = Rates {
+    input: 10.0,
+    output: 50.0,
+    cache_read: 0.25,
+};
+const FABLE_5: Rates = Rates {
+    input: 10.0,
+    output: 50.0,
+    cache_read: 1.0,
+};
+const OPUS_55: Rates = Rates {
+    input: 4.0,
+    output: 20.0,
+    cache_read: 0.20,
+};
+// Opus 4.5 through 5.
 const OPUS_45: Rates = Rates {
     input: 5.0,
     output: 25.0,
@@ -599,10 +623,28 @@ const OPUS_LEGACY: Rates = Rates {
     output: 75.0,
     cache_read: 1.50,
 };
+const SONNET_55: Rates = Rates {
+    input: 2.0,
+    output: 10.0,
+    cache_read: 0.10,
+};
+const SONNET_5: Rates = Rates {
+    input: 2.0,
+    output: 10.0,
+    cache_read: 0.20,
+};
+// Sonnet 3.x and 4.x.
 const SONNET: Rates = Rates {
     input: 3.0,
     output: 15.0,
     cache_read: 0.30,
+};
+// Prompts up to 100K tokens. Longer prompts bill at $0.50/$2.50, which the
+// per-model tallies can't tell apart, so long-prompt Haiku 5.5 use reads low.
+const HAIKU_55: Rates = Rates {
+    input: 0.10,
+    output: 0.50,
+    cache_read: 0.01,
 };
 const HAIKU_45: Rates = Rates {
     input: 1.0,
@@ -643,8 +685,10 @@ const GPT5: Rates = Rates {
 };
 
 /// Best-effort list-price lookup by model id. Unknown ids fall back to their
-/// family's latest rates (or Sonnet's) — the readout is an estimate either
-/// way, and new model releases shouldn't zero the meter.
+/// family's latest rates (or Sonnet 4's for an unknown family). The readout is
+/// an estimate either way, and new model releases shouldn't zero the meter.
+/// Matching is by substring so prefixed ids ("eu.anthropic.claude-opus-5-5")
+/// price the same as bare ones.
 fn rates_for(model: &str) -> Rates {
     let m = model.to_ascii_lowercase();
     if m.contains("haiku") {
@@ -652,25 +696,46 @@ fn rates_for(model: &str) -> Rates {
             HAIKU_35
         } else if m.contains("haiku-3") || m.contains("3-haiku") {
             HAIKU_3
-        } else {
+        } else if m.contains("haiku-4") {
             HAIKU_45
+        } else {
+            HAIKU_55
         }
     } else if m.contains("opus") {
         // Opus dropped to $5/$25 at 4.5; earlier 3/4/4.1 were $15/$75.
-        match opus_minor(&m) {
+        match minor_after(&m, "opus-4-") {
             Some(minor) if minor >= 5 => OPUS_45,
             Some(_) => OPUS_LEGACY,
             // Plain opus-4 (date-only suffix) and opus-3 predate the reprice.
             None if m.contains("opus-4") || m.contains("opus-3") || m.contains("3-opus") => {
                 OPUS_LEGACY
             }
-            // Unversioned or 5.x+: current pricing.
-            None => OPUS_45,
+            // Opus 5 kept the 4.5 rates; 5.5 repriced again.
+            None if is_base_five(&m, "opus") => OPUS_45,
+            // 5.5, unversioned, or newer: current pricing.
+            None => OPUS_55,
         }
-    } else if m.contains("fable") || m.contains("mythos") {
-        // Claude 5 tier — no published transcript pricing pinned here yet;
-        // price at the top Opus tier so the estimate errs recognizably.
-        OPUS_45
+    } else if m.contains("sonnet") {
+        // "claude-3-5-sonnet" / "claude-3-7-sonnet" put the version first.
+        let legacy_3x = ["3-sonnet", "3-5-sonnet", "3-7-sonnet"];
+        if m.contains("sonnet-4")
+            || m.contains("sonnet-3")
+            || legacy_3x.iter().any(|id| m.contains(id))
+        {
+            SONNET
+        } else if is_base_five(&m, "sonnet") {
+            SONNET_5
+        } else {
+            SONNET_55
+        }
+    } else if let Some(family) = ["fable", "mythos"].into_iter().find(|f| m.contains(f)) {
+        if is_base_five(&m, family) {
+            FABLE_5
+        } else if minor_after(&m, &format!("{family}-5-")) == Some(1) {
+            FABLE_51
+        } else {
+            FABLE_52
+        }
     } else if m.contains("gpt") {
         // Codex models. Unknown GPT ids estimate at the older flagship rate.
         if m.contains("5.6-sol") {
@@ -687,15 +752,26 @@ fn rates_for(model: &str) -> Rates {
     }
 }
 
-/// The x in "opus-4-x". `None` for opus-3 ids, unversioned ids, or 5.x+ ids.
-fn opus_minor(model: &str) -> Option<u32> {
-    let rest = model.split("opus-4-").nth(1)?;
+/// The x in "{prefix}x", e.g. the 8 in "opus-4-8" for prefix "opus-4-".
+/// `None` when the prefix is absent or is followed by a date, not a minor.
+fn minor_after(model: &str, prefix: &str) -> Option<u32> {
+    let rest = model.split(prefix).nth(1)?;
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     // An 8-digit run is the date suffix of a plain "opus-4" id, not a minor.
     if digits.is_empty() || digits.len() >= 8 {
         return None;
     }
     digits.parse().ok()
+}
+
+/// True for the plain 5.0 release of a family ("claude-opus-5", optionally
+/// date-suffixed), false for 5.x point releases and every other version.
+fn is_base_five(model: &str, family: &str) -> bool {
+    let prefix = format!("{family}-5");
+    model.split(&prefix).nth(1).is_some_and(|rest| {
+        !rest.starts_with(|c: char| c.is_ascii_digit())
+            && minor_after(model, &format!("{prefix}-")).is_none()
+    })
 }
 
 /// Bar color family for a model id.
@@ -1002,8 +1078,31 @@ mod tests {
         assert_eq!(rates_for("claude-haiku-4-5-20251001").input, 1.0);
         assert_eq!(rates_for("claude-sonnet-4-5-20250929").input, 3.0);
         // Unknown ids estimate rather than zero out.
-        assert_eq!(rates_for("claude-fable-5").input, 5.0);
         assert_eq!(rates_for("some-future-model").input, 3.0);
+    }
+
+    #[test]
+    fn pricing_claude_5() {
+        let r = |m: &str| {
+            let r = rates_for(m);
+            (r.input, r.output, r.cache_read)
+        };
+        assert_eq!(r("claude-opus-5-5"), (4.0, 20.0, 0.20));
+        assert_eq!(r("eu.anthropic.claude-opus-5-5"), (4.0, 20.0, 0.20));
+        assert_eq!(r("claude-opus-5"), (5.0, 25.0, 0.50));
+        assert_eq!(r("claude-sonnet-5-5"), (2.0, 10.0, 0.10));
+        assert_eq!(r("claude-sonnet-5"), (2.0, 10.0, 0.20));
+        assert_eq!(r("claude-sonnet-4-6"), (3.0, 15.0, 0.30));
+        assert_eq!(r("claude-3-7-sonnet-20250219"), (3.0, 15.0, 0.30));
+        assert_eq!(r("claude-haiku-5-5"), (0.10, 0.50, 0.01));
+        assert_eq!(r("claude-fable-5-2"), (8.0, 40.0, 0.20));
+        assert_eq!(r("claude-mythos-5-2"), (8.0, 40.0, 0.20));
+        assert_eq!(r("claude-fable-5-1"), (10.0, 50.0, 0.25));
+        assert_eq!(r("claude-fable-5"), (10.0, 50.0, 1.0));
+        // Unversioned and newer-than-known ids take the family's latest rates.
+        assert_eq!(r("opus"), (4.0, 20.0, 0.20));
+        assert_eq!(r("claude-opus-6"), (4.0, 20.0, 0.20));
+        assert_eq!(r("claude-fable-6"), (8.0, 40.0, 0.20));
     }
 
     #[test]
